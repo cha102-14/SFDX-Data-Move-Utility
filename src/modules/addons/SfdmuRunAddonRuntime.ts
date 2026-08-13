@@ -308,7 +308,8 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
           sourceRecord,
           'Title',
           'Description',
-          'PathOnClient'
+          'PathOnClient',
+          'MigrationID__c'
         ) as Record<string, unknown>;
         newContentVersion['VersionData'] = blobData;
         newContentVersion['ReasonForChange'] = sourceContentVersion.reasonForChange;
@@ -332,7 +333,8 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
           sourceRecord,
           'Title',
           'Description',
-          'ContentUrl'
+          'ContentUrl',
+          'MigrationID__c'
         ) as Record<string, unknown>;
         newContentVersion['ReasonForChange'] = sourceContentVersion.reasonForChange;
         newContentVersion['ContentDocumentId'] = sourceContentVersion.targetContentDocumentId;

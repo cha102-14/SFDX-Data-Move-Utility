@@ -207,27 +207,67 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
     engine: API_ENGINE = API_ENGINE.DEFAULT_ENGINE,
     updateRecordId = true
   ): Promise<Array<Record<string, unknown>>> {
+
     if (!records || records.length === 0) {
       return [];
     }
 
-    await this._writeTargetCsvAsync(sObjectName, operation, records);
-
+    // CSV / simulation mode 沒有真正 DML，
+    // 維持原本寫入 payload 的行為。
     if (this._shouldSkipDml()) {
+      await this._writeTargetCsvAsync(
+        sObjectName,
+        operation,
+        records
+      );
+
       return records;
     }
 
-    const connection = await this._getConnectionAsync(false);
-    const engineInstance = this._createApiEngine(connection, sObjectName, records.length, engine);
-    const executor = new ApiEngineExecutor({
-      engine: engineInstance,
-      operation,
-      records,
-      updateRecordId,
-      logger: this._script.logger ?? Common.logger,
-      script: this._script,
-    });
+    const connection =
+      await this._getConnectionAsync(false);
+
+    const engineInstance =
+      this._createApiEngine(
+        connection,
+        sObjectName,
+        records.length,
+        engine
+      );
+
+    const executor =
+      new ApiEngineExecutor({
+        engine: engineInstance,
+        operation,
+        records,
+        updateRecordId,
+        logger: this._script.logger ?? Common.logger,
+        script: this._script,
+      });
+
+    // ============================================================
+    // 先執行真正 Salesforce DML
+    // ============================================================
     await executor.executeCrudAsync();
+
+    // ============================================================
+    // 此時 records 應已包含：
+    //
+    // 成功：
+    //   Id = 068...
+    //   Errors = null
+    //
+    // 失敗：
+    //   Id = null / undefined
+    //   Errors = "DUPLICATE_VALUE: ..."
+    //
+    // ============================================================
+    await this._writeTargetCsvAsync(
+      sObjectName,
+      operation,
+      records
+    );
+
     return records;
   }
 
@@ -419,6 +459,193 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
     const targetFile = this._getTargetCsvFilename(sObjectName, operation);
     const columns = records.length > 0 ? Common.orderCsvColumnsWithIdFirstAndErrorsLast(Object.keys(records[0])) : [];
     await Common.writeCsvFileAsync(targetFile, records, true, columns.length > 0 ? columns : undefined, true, true);
+  }
+
+  /**
+    *  * Appends failed ContentVersion upload records to a dedicated error CSV.
+   *
+   * @param records - ContentVersion DML result records.
+   * @param newToSourceVersionMap - Mapping from upload payload to source ContentVersion.
+   */
+  private async _appendContentVersionErrorsCsvAsync(
+    records: Array<Record<string, unknown>>,
+    newToSourceVersionMap: Map<Record<string, unknown>, ContentVersion>
+  ): Promise<void> {
+
+    // 跟 createTargetCSVFiles 設定一致。
+    // 沒開 CSV 輸出就不另外產生 error CSV。
+    if (!this._script.createTargetCSVFiles) {
+      return;
+    }
+
+    // ============================================================
+    // 只抓真正有 Salesforce Errors 的 records
+    // ============================================================
+    const failedRecords =
+      records.filter(
+        (record) =>
+          Boolean(record[ERRORS_FIELD_NAME])
+      );
+
+    if (failedRecords.length === 0) {
+      return;
+    }
+
+    // ============================================================
+    // 準備 error CSV rows
+    //
+    // 刻意不放 VersionData：
+    // 避免 Base64 造成 CSV 非常巨大。
+    // ============================================================
+    const errorRows: Array<Record<string, unknown>> =
+      failedRecords.map((record) => {
+
+        const sourceVersion =
+          newToSourceVersionMap.get(record);
+
+        const sourceRecord =
+          sourceVersion
+            ? (
+                sourceVersion as unknown as
+                  Record<string, unknown>
+              )
+            : undefined;
+
+        return {
+          SourceContentVersionId:
+            String(
+              sourceRecord?.['Id'] ??
+              record['MigrationID__c'] ??
+              ''
+            ),
+
+          SourceContentDocumentId:
+            String(
+              sourceRecord?.['ContentDocumentId'] ??
+              ''
+            ),
+
+          MigrationID__c:
+            String(
+              record['MigrationID__c'] ?? ''
+            ),
+
+          Title:
+            String(
+              record['Title'] ?? ''
+            ),
+
+          PathOnClient:
+            String(
+              record['PathOnClient'] ?? ''
+            ),
+
+          TargetContentDocumentId:
+            String(
+              record['ContentDocumentId'] ??
+              sourceVersion?.targetContentDocumentId ??
+              ''
+            ),
+
+          Errors:
+            String(
+              record[ERRORS_FIELD_NAME] ?? ''
+            ),
+        };
+      });
+
+    // ============================================================
+    // target/ContentVersion_insert_errors.csv
+    // ============================================================
+    const directory =
+      this._script.targetDirectoryPath;
+
+    fs.mkdirSync(
+      directory,
+      { recursive: true }
+    );
+
+    const errorFile =
+      Common.getCSVFilename(
+        directory,
+        'ContentVersion',
+        '_insert_errors.csv'
+      );
+
+    const columns = [
+      'SourceContentVersionId',
+      'SourceContentDocumentId',
+      'MigrationID__c',
+      'Title',
+      'PathOnClient',
+      'TargetContentDocumentId',
+      'Errors',
+    ];
+
+    // 使用目前 SFDMU 的 CSV delimiter。
+    const delimiter =
+      Common.csvWriteFileDelimiter || ',';
+
+    // 如果檔案不存在，第一批要寫 header。
+    const shouldWriteHeader =
+      !fs.existsSync(errorFile) ||
+      fs.statSync(errorFile).size === 0;
+
+    const lines: string[] = [];
+
+    if (shouldWriteHeader) {
+      lines.push(
+        columns
+          .map((column) =>
+            this._escapeCsvValue(
+              column
+            )
+          )
+          .join(delimiter)
+      );
+    }
+
+    errorRows.forEach((row) => {
+      lines.push(
+        columns
+          .map((column) =>
+            this._escapeCsvValue(
+              row[column]
+            )
+          )
+          .join(delimiter)
+      );
+    });
+
+    await fs.promises.appendFile(
+      errorFile,
+      `${lines.join('\n')}\n`,
+      {
+        encoding: 'utf8',
+      }
+    );
+  }
+
+  /**
+   * Escapes a CSV value.
+   *
+   * @param value - Raw CSV value.
+   * @returns CSV-safe value.
+   */
+  private _escapeCsvValue(
+    value: unknown
+  ): string {
+    void this;
+
+    const text =
+      value === null ||
+      typeof value === 'undefined'
+        ? ''
+        : String(value);
+
+    // 全部使用雙引號包起來，
+    // 並將內容中的 " 變成 ""。
+    return `"${text.replace(/"/g, '""')}"`;
   }
 
   /**
@@ -617,6 +844,16 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
       true
     );
 
+    // ============================================================
+    // NEW:
+    // 將 Salesforce API 回傳失敗的 ContentVersion
+    // 額外寫入 ContentVersion_insert_errors.csv
+    // ============================================================
+    await this._appendContentVersionErrorsCsvAsync(
+      records,
+      newToSourceVersionMap
+    );
+
     const newRecordIdToSourceVersionMap = new Map<string, ContentVersion>();
 
     records.forEach((record) => {
@@ -624,12 +861,21 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
       if (!sourceVersion) {
         return;
       }
+
       sourceVersion.targetId = String(record['Id'] ?? '');
+
       if (record[ERRORS_FIELD_NAME]) {
         sourceVersion.isError = true;
       }
-      if (!sourceVersion.targetContentDocumentId && sourceVersion.targetId) {
-        newRecordIdToSourceVersionMap.set(sourceVersion.targetId, sourceVersion);
+
+      if (
+        !sourceVersion.targetContentDocumentId &&
+        sourceVersion.targetId
+      ) {
+        newRecordIdToSourceVersionMap.set(
+          sourceVersion.targetId,
+          sourceVersion
+        );
       }
     });
 
@@ -637,17 +883,28 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
       return;
     }
 
-    const queries = this.createFieldInQueries(['Id', 'ContentDocumentId'], 'Id', 'ContentVersion', [
-      ...newRecordIdToSourceVersionMap.keys(),
-    ]);
+    const queries = this.createFieldInQueries(
+      ['Id', 'ContentDocumentId'],
+      'Id',
+      'ContentVersion',
+      [...newRecordIdToSourceVersionMap.keys()]
+    );
+
     const queried = await this.queryMultiAsync(false, queries);
 
     queried.forEach((record) => {
-      const sourceVersion = newRecordIdToSourceVersionMap.get(String(record['Id'] ?? ''));
+      const sourceVersion =
+        newRecordIdToSourceVersionMap.get(
+          String(record['Id'] ?? '')
+        );
+
       if (!sourceVersion) {
         return;
       }
-      sourceVersion.targetContentDocumentId = String(record['ContentDocumentId'] ?? '');
+
+      sourceVersion.targetContentDocumentId =
+        String(record['ContentDocumentId'] ?? '');
+
       if (record[ERRORS_FIELD_NAME]) {
         sourceVersion.isError = true;
       }

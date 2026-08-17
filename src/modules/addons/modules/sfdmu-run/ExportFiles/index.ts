@@ -267,6 +267,7 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
     };
 
     const exportedFilesMap = new Map<RecordType, DataToExportType>();
+    const targetContentVersionsByExternalId = new Map<string, RecordType>();
     const parentMap = this._createSourceToTargetParentIdMap(task);
     const parentTransferCounters = this._createParentTransferCounters(parentMap);
     let isDeleted = false;
@@ -335,6 +336,12 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
       }
 
       await readSourceContentVersionsAsync('ContentDocumentId');
+      /*
+      * NEW:
+      * Find existing target ContentVersions globally
+      * by the configured externalId.
+      */
+      await readTargetContentVersionsByExternalIdAsync();
       this._addDownloadedFileCountersFromDocLinks(
         sourceFiles.recIdToDocLinks,
         sourceFiles.docIdToDocVersion,
@@ -496,15 +503,101 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
       this.runtime.logFormattedInfo(this, 'ExportFiles_RetrievedRecords', String(contentVersions.length));
     };
 
+    const readTargetContentVersionsByExternalIdAsync = async (): Promise<void> => {
+      if (
+        operation === OPERATION.Insert ||
+        sourceFiles.docIdToDocVersion.size === 0
+      ) {
+        return;
+      }
+
+      const externalIdValues = Common.distinctStringArray(
+        [...sourceFiles.docIdToDocVersion.values()]
+          .map((record) => String(record[externalId] ?? ''))
+          .filter((value) => Boolean(value))
+      );
+
+      if (externalIdValues.length === 0) {
+        return;
+      }
+
+      const fields = Common.distinctStringArray([
+        'Id',
+        externalId,
+        'ContentDocumentId',
+        'ContentModifiedDate',
+        'Title',
+        'Checksum',
+        'ContentUrl',
+      ]);
+
+      let queries = this.runtime.createFieldInQueries(
+        fields,
+        externalId,
+        'ContentVersion',
+        externalIdValues,
+        'IsLatest = true'
+      );
+
+      const targetWhereClause =
+        normalizedArgs.targetWhere ?? '';
+
+      if (targetWhereClause) {
+        queries = queries.map(
+          (query) =>
+            query.replace(
+              'WHERE',
+              `WHERE (${targetWhereClause}) AND (`
+            ) + ')'
+        );
+      }
+
+      const contentVersions =
+        await this.runtime.queryMultiAsync(false, queries);
+
+      contentVersions.forEach((record) => {
+        const key = String(record[externalId] ?? '');
+
+        if (key) {
+          targetContentVersionsByExternalId.set(
+            key,
+            record
+          );
+        }
+      });
+    };
+
     const compareContentVersionsAsync = (compareByDocIdsByField: string): void => {
       sourceFiles.recIdToDocLinks.forEach((sourceDocLinks, recordId) => {
         sourceDocLinks.forEach((sourceDocLink) => {
-          const sourceContentVersion = sourceFiles.docIdToDocVersion.get(String(sourceDocLink[compareByDocIdsByField]));
+
+          // ============================================================
+          // 1. 取得 Source ContentVersion
+          // ============================================================
+          const sourceContentVersion =
+            sourceFiles.docIdToDocVersion.get(
+              String(sourceDocLink[compareByDocIdsByField])
+            );
+
           if (!sourceContentVersion) {
             return;
           }
-          const sourceRecord = task.sourceData.idRecordsMap.get(recordId);
-          const targetRecord = sourceRecord ? task.sourceToTargetRecordMap.get(sourceRecord) : undefined;
+
+          // ============================================================
+          // 2. 取得 Source Parent -> Target Parent
+          // ============================================================
+          const sourceRecord =
+            task.sourceData.idRecordsMap.get(recordId);
+
+          const targetRecord =
+            sourceRecord
+              ? task.sourceToTargetRecordMap.get(sourceRecord)
+              : undefined;
+
+          // ============================================================
+          // 3. 第一次遇到這個 Source ContentVersion 時，
+          //    建立 exportedFilesMap entry
+          // ============================================================
           if (!exportedFilesMap.has(sourceContentVersion)) {
             exportedFilesMap.set(sourceContentVersion, {
               version: new ContentVersion(sourceContentVersion),
@@ -513,46 +606,237 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
               targetVersion: null,
             });
           }
-          const exportedFiles = exportedFilesMap.get(sourceContentVersion);
+
+          const exportedFiles =
+            exportedFilesMap.get(sourceContentVersion);
+
           if (!exportedFiles || !targetRecord) {
             return;
           }
 
-          const targetDocLinks = targetFiles.recIdToDocLinks.get(String(targetRecord['Id'] ?? '')) ?? [];
+          // ============================================================
+          // 4. 取得「目前這個 Target Parent」已經存在的 CDL
+          //
+          // 例如目前處理 Account B：
+          //
+          // targetDocLinks =
+          //   Account B 現在已經連到哪些 ContentDocument
+          // ============================================================
+          const targetRecordId =
+            String(targetRecord['Id'] ?? '');
+
+          const targetDocLinks =
+            targetFiles.recIdToDocLinks.get(targetRecordId) ?? [];
+
+          // ============================================================
+          // 5. NEW:
+          //    先用 externalId 在「整個 Target」尋找 ContentVersion
+          //
+          // export.json:
+          //
+          // "externalId": "MigrationID__c"
+          //
+          // 所以這裡實際就是：
+          //
+          // sourceContentVersion["MigrationID__c"]
+          // ============================================================
+          const sourceExternalValue =
+            String(sourceContentVersion[externalId] ?? '');
+
+          const globalTargetContentVersionRecord =
+            sourceExternalValue
+              ? targetContentVersionsByExternalId.get(sourceExternalValue)
+              : undefined;
+
+          // ============================================================
+          // 6. NEW:
+          //    如果全域 Target 已經存在相同 MigrationID 的 File
+          //
+          //    就表示：
+          //
+          //    Source File 已經被其他 Parent migration 過了
+          //
+          //    例如：
+          //
+          //    Opportunity A -> File X
+          //
+          //    現在跑 Account B -> 同一個 File X
+          // ============================================================
+          if (globalTargetContentVersionRecord) {
+
+            const targetContentVersion =
+              exportedFiles.targetVersion ??
+              new ContentVersion(globalTargetContentVersionRecord);
+
+            const targetContentDocumentId =
+              String(
+                globalTargetContentVersionRecord['ContentDocumentId'] ?? ''
+              );
+
+            // ----------------------------------------------------------
+            // 告訴 SFDMU：
+            // Source File 已經有對應的 Target Version
+            // ----------------------------------------------------------
+            exportedFiles.targetVersion =
+              targetContentVersion;
+
+            // ----------------------------------------------------------
+            // 告訴後面的 transferContentVersions：
+            // 如果真的要新增 version，
+            // 要加到這個既有 ContentDocument 上
+            // ----------------------------------------------------------
+            if (!exportedFiles.version.targetContentDocumentId) {
+              exportedFiles.version.targetContentDocumentId =
+                targetContentDocumentId;
+            }
+
+            // ----------------------------------------------------------
+            // 保留 SFDMU 原本版本更新判斷
+            // ----------------------------------------------------------
+            if (
+              exportedFiles.version.isNewer(targetContentVersion)
+            ) {
+              exportedFiles.isVersionChanged = true;
+            }
+
+            // ----------------------------------------------------------
+            // NEW:
+            // File 已存在，不代表目前 Parent 已經有 CDL。
+            //
+            // 檢查：
+            //
+            // ContentDocument 069NEW
+            // 是否已經 link 到目前 targetRecord？
+            // ----------------------------------------------------------
+            const alreadyLinked =
+              targetDocLinks.some((targetDocLink) => {
+                const linkedContentDocumentId =
+                  String(
+                    targetDocLink[compareByDocIdsByField] ?? ''
+                  );
+
+                return (
+                  linkedContentDocumentId ===
+                  targetContentDocumentId
+                );
+              });
+
+            // ----------------------------------------------------------
+            // File 已存在
+            // 但目前 Parent 還沒 link
+            //
+            // Upsert / Insert:
+            //   補 ContentDocumentLink
+            //
+            // Update:
+            //   保留 SFDMU 原本語意，不新增 link
+            // ----------------------------------------------------------
+            if (
+              !alreadyLinked &&
+              operation !== OPERATION.Update
+            ) {
+              exportedFiles.recordsToBeLinked.push({
+                Id: targetRecordId,
+                sourceDocLink,
+              });
+            }
+
+            // ----------------------------------------------------------
+            // 非常重要：
+            //
+            // 已經透過 Global MigrationID 找到 File，
+            // 不要再掉進下面舊邏輯，
+            // 否則舊邏輯又會因為 Account 沒 CDL 而判定 found=false。
+            // ----------------------------------------------------------
+            return;
+          }
+
+          // ============================================================
+          // 7. FALLBACK:
+          //    以下基本上就是 SFDMU 原本邏輯
+          //
+          //    如果 global lookup 沒找到，
+          //    再從目前 Parent 已有的 CDL 中尋找 Target File
+          // ============================================================
           let found = false;
 
           targetDocLinks.forEach((targetDocLink) => {
-            const targetDocId = String(targetDocLink[compareByDocIdsByField] ?? '');
-            const targetContentVersionRecord = targetFiles.docIdToDocVersion.get(targetDocId);
+
+            const targetDocId =
+              String(
+                targetDocLink[compareByDocIdsByField] ?? ''
+              );
+
+            const targetContentVersionRecord =
+              targetFiles.docIdToDocVersion.get(targetDocId);
+
             if (!targetContentVersionRecord) {
               return;
             }
-            const targetContentVersion = exportedFiles.targetVersion ?? new ContentVersion(targetContentVersionRecord);
-            const sourceExternalValue = String(sourceContentVersion[externalId] ?? '');
-            const targetExternalValue = String(targetContentVersionRecord[externalId] ?? '');
-            if (sourceExternalValue && sourceExternalValue === targetExternalValue) {
+
+            const targetContentVersion =
+              exportedFiles.targetVersion ??
+              new ContentVersion(targetContentVersionRecord);
+
+            const targetExternalValue =
+              String(
+                targetContentVersionRecord[externalId] ?? ''
+              );
+
+            if (
+              sourceExternalValue &&
+              sourceExternalValue === targetExternalValue
+            ) {
               found = true;
-              exportedFiles.targetVersion = targetContentVersion;
-              if (!exportedFiles.version.targetContentDocumentId) {
-                exportedFiles.version.targetContentDocumentId = targetDocId;
+
+              exportedFiles.targetVersion =
+                targetContentVersion;
+
+              if (
+                !exportedFiles.version.targetContentDocumentId
+              ) {
+                exportedFiles.version.targetContentDocumentId =
+                  targetDocId;
               }
-              if (exportedFiles.version.isNewer(targetContentVersion)) {
+
+              if (
+                exportedFiles.version.isNewer(
+                  targetContentVersion
+                )
+              ) {
                 exportedFiles.isVersionChanged = true;
               }
             }
           });
 
-          if (!found && operation !== OPERATION.Update) {
+          // ============================================================
+          // 8. 原版行為：
+          //    Target 完全找不到 File
+          //
+          // Upsert / Insert -> 新增 File + Link
+          // Update          -> 不新增
+          // ============================================================
+          if (
+            !found &&
+            operation !== OPERATION.Update
+          ) {
             exportedFiles.recordsToBeLinked.push({
-              Id: String(targetRecord['Id'] ?? ''),
+              Id: targetRecordId,
               sourceDocLink,
             });
           }
         });
       });
 
+      // ==============================================================
+      // 9. 原版行為：
+      //
+      // 完全找不到 targetVersion
+      // -> 表示要建立新的 ContentVersion
+      // ==============================================================
       exportedFilesMap.forEach((exportedFile) => {
         const updatedFile = exportedFile;
+
         if (!updatedFile.targetVersion) {
           updatedFile.isVersionChanged = true;
         }

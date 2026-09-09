@@ -336,6 +336,7 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
         dataType: 'base64',
       });
 
+      const userMap = await this._getUserTargetIdMapAsync();
       const newToSourceVersionMap = new Map<Record<string, unknown>, ContentVersion>();
       const versionsToUpload = [...idToContentVersionBlobMap.keys()].map((versionId) => {
         const blobData = idToContentVersionBlobMap.get(versionId);
@@ -349,8 +350,30 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
           'Title',
           'Description',
           'PathOnClient',
-          'MigrationID__c'
+          'MigrationID__c',
+          'CreatedDate',
+          'CreatedById',
+          'OwnerId',
+          'Legacy_ID__c'
         ) as Record<string, unknown>;
+        const srcCreatedById = String(sourceRecord['CreatedById'] ?? '');
+        if (srcCreatedById) {
+          if (userMap.has(srcCreatedById)) {
+            newContentVersion['CreatedById'] = userMap.get(srcCreatedById);
+          } else if (String(newContentVersion['CreatedById'] ?? '').startsWith('0058a')) {
+            delete newContentVersion['CreatedById'];
+          }
+        }
+
+        const srcOwnerId = String(sourceRecord['OwnerId'] ?? '');
+        if (srcOwnerId) {
+          if (userMap.has(srcOwnerId)) {
+            newContentVersion['OwnerId'] = userMap.get(srcOwnerId);
+          } else if (String(newContentVersion['OwnerId'] ?? '').startsWith('0058a')) {
+            delete newContentVersion['OwnerId'];
+          }
+        }
+
         newContentVersion['VersionData'] = blobData;
         newContentVersion['ReasonForChange'] = sourceContentVersion.reasonForChange;
         newContentVersion['ContentDocumentId'] = sourceContentVersion.targetContentDocumentId;
@@ -366,6 +389,7 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
     await Common.serialExecAsync(uploadTasks);
 
     if (urlUploadJobs.length > 0) {
+      const userMap = await this._getUserTargetIdMapAsync();
       const newToSourceVersionMap = new Map<Record<string, unknown>, ContentVersion>();
       const versionsToUpload = urlUploadJobs.map((sourceContentVersion) => {
         const sourceRecord = sourceContentVersion as unknown as Record<string, unknown>;
@@ -374,8 +398,31 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
           'Title',
           'Description',
           'ContentUrl',
-          'MigrationID__c'
+          'MigrationID__c',
+          'CreatedDate',
+          'CreatedById',
+          'OwnerId',
+          'Legacy_ID__c'
         ) as Record<string, unknown>;
+
+        const srcCreatedById = String(sourceRecord['CreatedById'] ?? '');
+        if (srcCreatedById) {
+          if (userMap.has(srcCreatedById)) {
+            newContentVersion['CreatedById'] = userMap.get(srcCreatedById);
+          } else if (String(newContentVersion['CreatedById'] ?? '').startsWith('0058a')) {
+            delete newContentVersion['CreatedById'];
+          }
+        }
+
+        const srcOwnerId = String(sourceRecord['OwnerId'] ?? '');
+        if (srcOwnerId) {
+          if (userMap.has(srcOwnerId)) {
+            newContentVersion['OwnerId'] = userMap.get(srcOwnerId);
+          } else if (String(newContentVersion['OwnerId'] ?? '').startsWith('0058a')) {
+            delete newContentVersion['OwnerId'];
+          }
+        }
+
         newContentVersion['ReasonForChange'] = sourceContentVersion.reasonForChange;
         newContentVersion['ContentDocumentId'] = sourceContentVersion.targetContentDocumentId;
         newToSourceVersionMap.set(newContentVersion, sourceContentVersion);
@@ -909,5 +956,130 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
         sourceVersion.isError = true;
       }
     });
+  }
+
+  /**
+   * Cached User SourceId -> TargetId map.
+   */
+  private _userTargetIdMap: Map<string, string> | undefined;
+
+  /**
+   * Builds and returns the User mapping table.
+   * Priority:
+   * 1. Read User mapping dynamically queried from export.json (User Task using MigrationID__c).
+   * 2. InactiveOwnerChangeToManagerMap.csv overrides (Inactive Owner -> Manager Target ID).
+   */
+  private async _getUserTargetIdMapAsync(): Promise<Map<string, string>> {
+    if (this._userTargetIdMap) {
+      return this._userTargetIdMap;
+    }
+
+    const userMap = new Map<string, string>();
+
+    // 1. Dynamic User task mapping from export.json
+    const userTask = this._script.job?.getTaskBySObjectName('User');
+    if (userTask) {
+      // 1a. Map via sourceToTargetRecordMap (if populated)
+      userTask.sourceToTargetRecordMap.forEach((targetRecord, sourceRecord) => {
+        const srcId = String(sourceRecord['Id'] ?? '');
+        const tgtId = String(targetRecord['Id'] ?? '');
+        if (srcId && tgtId) {
+          userMap.set(srcId, tgtId);
+        }
+      });
+
+      // 1b. Match targetRecords to sourceRecords by MigrationID__c for Readonly tasks
+      const targetData = userTask.targetTaskData || userTask.targetData;
+      const sourceData = userTask.sourceTaskData || userTask.sourceData;
+
+      if (targetData && targetData.extIdRecordsMap) {
+        targetData.extIdRecordsMap.forEach((tgtId, extId) => {
+          if (extId && tgtId && !userMap.has(extId)) {
+            userMap.set(extId, tgtId);
+          }
+        });
+      }
+
+      if (targetData?.records && sourceData?.records) {
+        const migrationIdToTargetIdMap = new Map<string, string>();
+        targetData.records.forEach((tgtRecord) => {
+          const tgtId = String(tgtRecord['Id'] ?? '');
+          const migrationId = String(tgtRecord['MigrationID__c'] ?? '').trim();
+          if (tgtId && migrationId) {
+            migrationIdToTargetIdMap.set(migrationId, tgtId);
+          }
+        });
+
+        sourceData.records.forEach((srcRecord) => {
+          const srcId = String(srcRecord['Id'] ?? '');
+          const srcMigrationId = String(srcRecord['MigrationID__c'] ?? srcId).trim();
+          const tgtId = migrationIdToTargetIdMap.get(srcId) || migrationIdToTargetIdMap.get(srcMigrationId);
+          if (srcId && tgtId && !userMap.has(srcId)) {
+            userMap.set(srcId, tgtId);
+          }
+        });
+      }
+    }
+
+    // 2. Fallback User mapping CSV (User(forUpdateMigrationId).csv)
+    const userCsvCandidates = [
+      path.join(this.basePath, '..', '..', 'TSC_DataMigration_2', 'UserMap', 'User(forUpdateMigrationId).csv'),
+    ];
+
+    for (const csvPath of userCsvCandidates) {
+      if (fs.existsSync(csvPath)) {
+        try {
+          const rows = await Common.readCsvFileAsync(csvPath, 0, undefined, true);
+          rows.forEach((row) => {
+            const tgtId = String(row['Id'] ?? '').trim();
+            const srcId = String(row['MigrationID__c'] ?? '').trim();
+            if (srcId && tgtId && !userMap.has(srcId)) {
+              userMap.set(srcId, tgtId);
+            }
+          });
+          if (rows.length > 0) break;
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    // 3. Read InactiveOwnerChangeToManagerMap.csv (Inactive Owner -> Manager Target ID)
+    const inactiveRules = new Map<string, string>();
+    const inactiveCsvCandidates = [
+      path.join(this.basePath, '..', '..', 'TSC_DataMigration_2', 'UserMap', 'InactiveOwnerChangeToManagerMap.csv'),
+    ];
+
+    for (const csvPath of inactiveCsvCandidates) {
+      if (fs.existsSync(csvPath)) {
+        try {
+          const rows = await Common.readCsvFileAsync(csvPath, 0, undefined, true);
+          rows.forEach((row) => {
+            const inact = String(row['inactivedOwnerId'] ?? '').trim();
+            const newOwner = String(row['newOnwerId'] ?? '').trim();
+            if (inact && newOwner) {
+              inactiveRules.set(inact, newOwner);
+            }
+          });
+          if (inactiveRules.size > 0) break;
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    // Override inactive users with Manager's Target ID
+    inactiveRules.forEach((newOwnerId, inactId) => {
+      let managerTargetId = userMap.get(newOwnerId);
+      if (!managerTargetId && newOwnerId.startsWith('005') && !newOwnerId.startsWith('0058a')) {
+        managerTargetId = newOwnerId;
+      }
+      if (managerTargetId) {
+        userMap.set(inactId, managerTargetId);
+      }
+    });
+
+    this._userTargetIdMap = userMap;
+    return userMap;
   }
 }

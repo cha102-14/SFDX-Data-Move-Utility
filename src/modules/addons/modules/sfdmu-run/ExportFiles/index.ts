@@ -444,6 +444,10 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
         'Checksum',
         'ContentUrl',
         'ContentBodyId',
+        'CreatedDate',
+        'CreatedById',
+        'OwnerId',
+        'Legacy_ID__c'
       ]);
       let queries = this.runtime.createFieldInQueries(
         fields,
@@ -480,6 +484,10 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
         'Title',
         'Checksum',
         'ContentUrl',
+        'CreatedDate',
+        'CreatedById',
+        'OwnerId',
+        'Legacy_ID__c'
       ]);
 
       let queries = this.runtime.createFieldInQueries(
@@ -529,6 +537,10 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
         'Title',
         'Checksum',
         'ContentUrl',
+        'CreatedDate',
+        'CreatedById',
+        'OwnerId',
+        'Legacy_ID__c'
       ]);
 
       let queries = this.runtime.createFieldInQueries(

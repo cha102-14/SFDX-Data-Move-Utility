@@ -360,17 +360,9 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
         if (srcCreatedById) {
           if (userMap.has(srcCreatedById)) {
             newContentVersion['CreatedById'] = userMap.get(srcCreatedById);
+            newContentVersion['OwnerId'] = userMap.get(srcCreatedById);
           } else if (String(newContentVersion['CreatedById'] ?? '').startsWith('0058a')) {
             delete newContentVersion['CreatedById'];
-          }
-        }
-
-        const srcOwnerId = String(sourceRecord['OwnerId'] ?? '');
-        if (srcOwnerId) {
-          if (userMap.has(srcOwnerId)) {
-            newContentVersion['OwnerId'] = userMap.get(srcOwnerId);
-          } else if (String(newContentVersion['OwnerId'] ?? '').startsWith('0058a')) {
-            delete newContentVersion['OwnerId'];
           }
         }
 
@@ -409,17 +401,9 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
         if (srcCreatedById) {
           if (userMap.has(srcCreatedById)) {
             newContentVersion['CreatedById'] = userMap.get(srcCreatedById);
+            newContentVersion['OwnerId'] = userMap.get(srcCreatedById);
           } else if (String(newContentVersion['CreatedById'] ?? '').startsWith('0058a')) {
             delete newContentVersion['CreatedById'];
-          }
-        }
-
-        const srcOwnerId = String(sourceRecord['OwnerId'] ?? '');
-        if (srcOwnerId) {
-          if (userMap.has(srcOwnerId)) {
-            newContentVersion['OwnerId'] = userMap.get(srcOwnerId);
-          } else if (String(newContentVersion['OwnerId'] ?? '').startsWith('0058a')) {
-            delete newContentVersion['OwnerId'];
           }
         }
 
@@ -1047,7 +1031,7 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
     // 3. Read InactiveOwnerChangeToManagerMap.csv (Inactive Owner -> Manager Target ID)
     const inactiveRules = new Map<string, string>();
     const inactiveCsvCandidates = [
-      path.join(this.basePath, '..', '..', 'TSC_DataMigration_2', 'UserMap', 'InactiveOwnerChangeToManagerMap.csv'),
+      path.join(this.basePath, 'InactiveOwnerChangeToManagerMap.csv'),
     ];
 
     for (const csvPath of inactiveCsvCandidates) {

@@ -2883,7 +2883,12 @@ export default class MigrationJobTask implements ISFdmuRunCustomAddonTask {
       target.set(fieldName, reasons);
     };
     const notCreatableSourceFields = processedData.fields.filter(
-      (field) => field.isDescribed && !field.creatable && field.nameId !== 'Id'
+      (field) =>
+        field.isDescribed &&
+        !field.creatable &&
+        field.nameId !== 'Id' &&
+        field.nameId !== 'CreatedDate' &&
+        field.nameId !== 'CreatedById'
     );
     const notUpdateableSourceFields = processedData.fields.filter(
       (field) => field.isDescribed && !field.updateable && field.nameId !== 'Id'

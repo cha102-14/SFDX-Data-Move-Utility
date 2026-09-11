@@ -1007,7 +1007,7 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
 
     // 2. Fallback User mapping CSV (User(forUpdateMigrationId).csv)
     const userCsvCandidates = [
-      path.join(this.basePath, '..', '..', 'TSC_DataMigration_2', 'UserMap', 'User(forUpdateMigrationId).csv'),
+      path.join(this.basePath, 'InactiveOwnerChangeToManagerMap.csv'),
     ];
 
     for (const csvPath of userCsvCandidates) {

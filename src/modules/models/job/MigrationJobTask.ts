@@ -6,6 +6,7 @@
  */
 
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import type { Connection } from '@jsforce/jsforce-node';
 import type { WhereClause } from 'soql-parser-js';
@@ -363,6 +364,48 @@ export default class MigrationJobTask implements ISFdmuRunCustomAddonTask {
    * @param defaultMap - Default lookup map for non-polymorphic fields.
    * @returns Resolved Id or undefined.
    */
+  private _inactiveRulesMapCache: Map<string, string> | undefined;
+
+  private _getInactiveRulesMap(): Map<string, string> {
+    if (this._inactiveRulesMapCache) {
+      return this._inactiveRulesMapCache;
+    }
+    this._inactiveRulesMapCache = new Map<string, string>();
+    try {
+      const basePath = this.job.script.basePath;
+      const csvCandidates = [
+        path.join(basePath, 'InactiveOwnerChangeToManagerMap.csv'),
+      ];
+      for (const csvPath of csvCandidates) {
+        if (fs.existsSync(csvPath)) {
+          const fileContent = fs.readFileSync(csvPath, 'utf8');
+          const lines = fileContent.split(/\r?\n/);
+          if (lines.length > 1) {
+            const headers = lines[0].split(',').map((h) => h.trim().replace(/^["']|["']$/g, ''));
+            const inactIdx = headers.indexOf('inactivedOwnerId');
+            const newOwnerIdx = headers.indexOf('newOnwerId');
+            if (inactIdx !== -1 && newOwnerIdx !== -1) {
+              for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                const cols = line.split(',').map((c) => c.trim().replace(/^["']|["']$/g, ''));
+                const inact = cols[inactIdx];
+                const newOwner = cols[newOwnerIdx];
+                if (inact && newOwner) {
+                  this._inactiveRulesMapCache.set(inact, newOwner);
+                }
+              }
+            }
+          }
+          if (this._inactiveRulesMapCache.size > 0) break;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return this._inactiveRulesMapCache;
+  }
+
   public resolveLookupIdValue(
     field: SFieldDescribe,
     lookupValue: string,
@@ -374,7 +417,35 @@ export default class MigrationJobTask implements ISFdmuRunCustomAddonTask {
       return undefined;
     }
     const resolvedMap = this._resolveLookupMap(field, userMap, groupMap, defaultMap);
-    return resolvedMap.get(lookupValue);
+    let targetId = resolvedMap.get(lookupValue);
+
+    const referencedObj = (field.polymorphicReferenceObjectType || field.referencedObjectType || '').toLowerCase();
+    if (!targetId && (referencedObj === 'user' || resolvedMap === userMap)) {
+      // 1. 檢查 InactiveOwnerChangeToManagerMap.csv
+      const inactiveMap = this._getInactiveRulesMap();
+      const newOwnerId = inactiveMap.get(lookupValue);
+      if (newOwnerId) {
+        let managerTargetId = userMap.get(newOwnerId);
+        if (!managerTargetId && newOwnerId.startsWith('005')) {
+          managerTargetId = newOwnerId;
+        }
+        if (managerTargetId) {
+          targetId = managerTargetId;
+        }
+      }
+
+      // 2. 💡 業務邏輯：如果 userMap 與 InactiveMap 都沒找到，代表此 ID 本身就是新環境 (Target Org) 的啟用 User ID，直接使用！
+      if (!targetId && lookupValue.startsWith('005')) {
+        targetId = lookupValue;
+      }
+
+      // 3. 全底保底：若真的不符合以上條件，才採用 Target Org 第一個有效 User
+      if (!targetId && userMap.size > 0) {
+        targetId = userMap.values().next().value;
+      }
+    }
+
+    return targetId;
   }
 
   /**
@@ -2783,7 +2854,18 @@ export default class MigrationJobTask implements ISFdmuRunCustomAddonTask {
       const parentTask = parentObjectName ? this.job.getTaskBySObjectName(parentObjectName) : undefined;
       const parentRecord = parentTask?.sourceData.idRecordsMap.get(parentId);
       const targetRecord = parentRecord ? parentTask?.sourceToTargetRecordMap.get(parentRecord) : undefined;
-      const resolvedId = targetRecord ? String(targetRecord['Id'] ?? '') : '';
+      let resolvedId = targetRecord ? String(targetRecord['Id'] ?? '') : '';
+
+      if (!resolvedId) {
+        const userTask = this.job.getTaskBySObjectName('User');
+        const groupTask = this.job.getTaskBySObjectName('Group');
+        const userMap = userTask?.targetData.extIdRecordsMap ?? new Map();
+        const groupMap = groupTask?.targetData.extIdRecordsMap ?? new Map();
+        const defaultMap = parentTask?.targetData.extIdRecordsMap ?? new Map();
+
+        resolvedId = this.resolveLookupIdValue(idField, parentId, userMap, groupMap, defaultMap) ?? '';
+      }
+
       if (resolvedId) {
         // eslint-disable-next-line no-param-reassign
         cloned[idField.nameId] = resolvedId;

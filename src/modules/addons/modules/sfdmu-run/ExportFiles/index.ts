@@ -2767,29 +2767,56 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
     parentIdMap: Map<string, string>,
     args: ExportFilesArgsType
   ): Promise<Array<Record<string, unknown>>> {
-    const mappedRows = await Promise.all(
-      rows.map(async (row) => {
-        const sourceParentId = String(this._getRowValueCaseInsensitive(row, 'ParentId') ?? '').trim();
-        const targetParentId = parentIdMap.get(sourceParentId);
-        if (!targetParentId) {
-          return null;
-        }
-
-        const rawBodyValue = String(this._getRowValueCaseInsensitive(row, 'Body') ?? '');
-        const resolvedBody = await this._resolveBinaryDataToBase64Async(rawBodyValue, args);
-        if (!resolvedBody) {
-          return null;
-        }
-
-        return {
-          ParentId: targetParentId,
-          Name: String(this._getRowValueCaseInsensitive(row, 'Name') ?? ''),
-          Body: resolvedBody,
-          ContentType: String(this._getRowValueCaseInsensitive(row, 'ContentType') ?? ''),
-          Description: String(this._getRowValueCaseInsensitive(row, 'Description') ?? ''),
-        } as Record<string, unknown>;
-      })
+    // Respect export.json parallelBinaryDownloads.
+    // Use a conservative fallback of 2 for this hotfix.
+    const concurrency = Math.max(
+      1,
+      Number(this.runtime.getScript()?.parallelBinaryDownloads || 2)
     );
+
+    const mappedRows: Array<Record<string, unknown> | null> = [];
+
+    for (let i = 0; i < rows.length; i += concurrency) {
+      const chunk = rows.slice(i, i + concurrency);
+      const chunkResults = await Promise.all(
+        chunk.map(async (row) => {
+          try {
+            const sourceParentId = String(this._getRowValueCaseInsensitive(row, 'ParentId') ?? '').trim();
+            const targetParentId = parentIdMap.get(sourceParentId);
+            if (!targetParentId) {
+              return null;
+            }
+
+            const rawBodyValue = String(this._getRowValueCaseInsensitive(row, 'Body') ?? '');
+            const resolvedBody = await this._resolveBinaryDataToBase64Async(rawBodyValue, args);
+            if (!resolvedBody) {
+              return null;
+            }
+
+            return {
+              ParentId: targetParentId,
+              Name: String(this._getRowValueCaseInsensitive(row, 'Name') ?? ''),
+              Body: resolvedBody,
+              ContentType: String(this._getRowValueCaseInsensitive(row, 'ContentType') ?? ''),
+              Description: String(this._getRowValueCaseInsensitive(row, 'Description') ?? ''),
+            } as Record<string, unknown>;
+          } catch (error) {
+            const attachmentId = String(
+              this._getRowValueCaseInsensitive(row, 'Id') ?? ''
+            );
+
+            this.runtime.logFormattedWarning(
+              this,
+              `[core:ExportFiles] Attachment download failed. Id=${attachmentId}, error=${String(error)}`
+            );
+
+            return null;
+          }
+        })
+      );
+
+      mappedRows.push(...chunkResults);
+    }
 
     return mappedRows.filter((row): row is Record<string, unknown> => Boolean(row));
   }

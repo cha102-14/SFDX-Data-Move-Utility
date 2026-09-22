@@ -1204,13 +1204,7 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
 
     const attachmentPayload = await this._mapAttachmentRowsToTargetAsync(packageData.attachments, parentMap, args);
     if (attachmentPayload.length > 0) {
-      const written = await this.runtime.updateTargetRecordsAsync(
-        'Attachment',
-        OPERATION.Insert,
-        attachmentPayload,
-        API_ENGINE.REST_API,
-        true
-      );
+      const written = await this._insertAttachmentsInChunksAsync(attachmentPayload, args);
       processed += written.length;
       if (parentTransferCounters) {
         this._addUploadedAttachmentCountersFromDmlResults(
@@ -1546,13 +1540,7 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
 
     const attachmentPayload = await this._mapAttachmentRowsToTargetAsync(packageData.attachments, parentMap, args);
     if (attachmentPayload.length > 0) {
-      const written = await this.runtime.updateTargetRecordsAsync(
-        'Attachment',
-        OPERATION.Insert,
-        attachmentPayload,
-        API_ENGINE.REST_API,
-        true
-      );
+      const written = await this._insertAttachmentsInChunksAsync(attachmentPayload, args);
       if (parentTransferCounters) {
         this._addUploadedAttachmentCountersFromDmlResults(
           written,
@@ -2819,6 +2807,62 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
     }
 
     return mappedRows.filter((row): row is Record<string, unknown> => Boolean(row));
+  }
+
+  /**
+   * Inserts Attachment rows in size-limited chunks to prevent Salesforce 50MB request size limit errors.
+   *
+   * @param attachmentPayload - Prepared Attachment payload rows.
+   * @param args - Normalized add-on args.
+   * @returns DML result records.
+   */
+  private async _insertAttachmentsInChunksAsync(
+    attachmentPayload: Array<Record<string, unknown>>,
+    args: ExportFilesArgsType
+  ): Promise<Array<Record<string, unknown>>> {
+    if (attachmentPayload.length === 0) {
+      return [];
+    }
+
+    const maxChunkSize = this._resolveMaxChunkSize(args.maxChunkSize);
+    const results: Array<Record<string, unknown>> = [];
+
+    let currentChunk: Array<Record<string, unknown>> = [];
+    let currentChunkBytes = 0;
+
+    for (const record of attachmentPayload) {
+      const bodyStr = String(record['Body'] ?? '');
+      const recordBytes = bodyStr.length;
+
+      if (currentChunk.length > 0 && (currentChunkBytes + recordBytes > maxChunkSize || currentChunk.length >= 25)) {
+        const chunkWritten = await this.runtime.updateTargetRecordsAsync(
+          'Attachment',
+          OPERATION.Insert,
+          currentChunk,
+          API_ENGINE.REST_API,
+          true
+        );
+        results.push(...chunkWritten);
+        currentChunk = [];
+        currentChunkBytes = 0;
+      }
+
+      currentChunk.push(record);
+      currentChunkBytes += recordBytes;
+    }
+
+    if (currentChunk.length > 0) {
+      const chunkWritten = await this.runtime.updateTargetRecordsAsync(
+        'Attachment',
+        OPERATION.Insert,
+        currentChunk,
+        API_ENGINE.REST_API,
+        true
+      );
+      results.push(...chunkWritten);
+    }
+
+    return results;
   }
 
   /**

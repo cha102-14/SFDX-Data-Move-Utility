@@ -2763,6 +2763,17 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
     );
 
     const mappedRows: Array<Record<string, unknown> | null> = [];
+    const total = rows.length;
+
+    if (total > 0) {
+      this.runtime.logFormattedInfo(
+        this,
+        `[core:ExportFiles] Starting download of ${total} Attachment binary records (concurrency=${concurrency})...`
+      );
+    }
+
+    let processedCount = 0;
+    const logInterval = Math.max(10, Math.floor(total / 20));
 
     for (let i = 0; i < rows.length; i += concurrency) {
       const chunk = rows.slice(i, i + concurrency);
@@ -2804,6 +2815,18 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
       );
 
       mappedRows.push(...chunkResults);
+      processedCount += chunk.length;
+
+      if (
+        total > 0 &&
+        (processedCount % logInterval < concurrency || processedCount >= total)
+      ) {
+        const percent = ((processedCount / total) * 100).toFixed(1);
+        this.runtime.logFormattedInfo(
+          this,
+          `[core:ExportFiles] Attachment download progress: ${processedCount}/${total} (${percent}%)`
+        );
+      }
     }
 
     return mappedRows.filter((row): row is Record<string, unknown> => Boolean(row));
@@ -2829,12 +2852,26 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
 
     let currentChunk: Array<Record<string, unknown>> = [];
     let currentChunkBytes = 0;
+    let chunkIndex = 0;
+
+    const totalRecords = attachmentPayload.length;
+    this.runtime.logFormattedInfo(
+      this,
+      `[core:ExportFiles] Starting upload of ${totalRecords} Attachment records in size-limited batches (maxChunkSize=${(maxChunkSize / 1_000_000).toFixed(2)} MB)...`
+    );
 
     for (const record of attachmentPayload) {
       const bodyStr = String(record['Body'] ?? '');
       const recordBytes = bodyStr.length;
 
       if (currentChunk.length > 0 && (currentChunkBytes + recordBytes > maxChunkSize || currentChunk.length >= 25)) {
+        chunkIndex++;
+        const mbSize = (currentChunkBytes / 1_000_000).toFixed(2);
+        this.runtime.logFormattedInfo(
+          this,
+          `[core:ExportFiles] Uploading Attachment batch #${chunkIndex}: ${currentChunk.length} records (${mbSize} MB)...`
+        );
+
         const chunkWritten = await this.runtime.updateTargetRecordsAsync(
           'Attachment',
           OPERATION.Insert,
@@ -2852,6 +2889,13 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
     }
 
     if (currentChunk.length > 0) {
+      chunkIndex++;
+      const mbSize = (currentChunkBytes / 1_000_000).toFixed(2);
+      this.runtime.logFormattedInfo(
+        this,
+        `[core:ExportFiles] Uploading Attachment batch #${chunkIndex}: ${currentChunk.length} records (${mbSize} MB)...`
+      );
+
       const chunkWritten = await this.runtime.updateTargetRecordsAsync(
         'Attachment',
         OPERATION.Insert,
@@ -2861,6 +2905,11 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
       );
       results.push(...chunkWritten);
     }
+
+    this.runtime.logFormattedInfo(
+      this,
+      `[core:ExportFiles] Completed Attachment uploads: ${results.length}/${totalRecords} records inserted.`
+    );
 
     return results;
   }

@@ -336,7 +336,7 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
         dataType: 'base64',
       });
 
-      const userMap = await this._getUserTargetIdMapAsync();
+      const userMap = await this.getUserTargetIdMapAsync();
       const newToSourceVersionMap = new Map<Record<string, unknown>, ContentVersion>();
       const versionsToUpload = [...idToContentVersionBlobMap.keys()].map((versionId) => {
         const blobData = idToContentVersionBlobMap.get(versionId);
@@ -381,7 +381,7 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
     await Common.serialExecAsync(uploadTasks);
 
     if (urlUploadJobs.length > 0) {
-      const userMap = await this._getUserTargetIdMapAsync();
+      const userMap = await this.getUserTargetIdMapAsync();
       const newToSourceVersionMap = new Map<Record<string, unknown>, ContentVersion>();
       const versionsToUpload = urlUploadJobs.map((sourceContentVersion) => {
         const sourceRecord = sourceContentVersion as unknown as Record<string, unknown>;
@@ -953,7 +953,7 @@ export default class SfdmuRunAddonRuntime extends AddonRuntime {
    * 1. Read User mapping dynamically queried from export.json (User Task using MigrationID__c).
    * 2. InactiveOwnerChangeToManagerMap.csv overrides (Inactive Owner -> Manager Target ID).
    */
-  private async _getUserTargetIdMapAsync(): Promise<Map<string, string>> {
+  public async getUserTargetIdMapAsync(): Promise<Map<string, string>> {
     if (this._userTargetIdMap) {
       return this._userTargetIdMap;
     }

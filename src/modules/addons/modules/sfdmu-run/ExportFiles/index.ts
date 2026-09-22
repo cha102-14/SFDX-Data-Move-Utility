@@ -72,6 +72,9 @@ type AttachmentRowType = {
   Body?: string;
   ContentType?: string;
   Description?: string;
+  CreatedDate?: string;
+  CreatedById?: string;
+  OwnerId?: string;
 };
 
 type NoteRowType = {
@@ -1314,7 +1317,7 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
 
     if (sourceParentIds.length > 0) {
       const attachmentQueries = this.runtime.createFieldInQueries(
-        ['Id', 'ParentId', 'Name', 'Body', 'ContentType', 'Description'],
+        ['Id', 'ParentId', 'Name', 'Body', 'ContentType', 'Description', 'CreatedDate', 'CreatedById', 'OwnerId'],
         'ParentId',
         'Attachment',
         sourceParentIds
@@ -1448,7 +1451,7 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
       path.join(csvDirectoryPath, ATTACHMENT_CSV_FILENAME),
       attachments,
       true,
-      ['Id', 'ParentId', 'Name', 'Body', 'ContentType', 'Description'],
+      ['Id', 'ParentId', 'Name', 'Body', 'ContentType', 'Description', 'CreatedDate', 'CreatedById', 'OwnerId'],
       true
     );
 
@@ -2739,6 +2742,9 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
       Body: bodyCsvValue,
       ContentType: String(this._getRowValueCaseInsensitive(row, 'ContentType') ?? ''),
       Description: String(this._getRowValueCaseInsensitive(row, 'Description') ?? ''),
+      CreatedDate: String(this._getRowValueCaseInsensitive(row, 'CreatedDate') ?? ''),
+      CreatedById: String(this._getRowValueCaseInsensitive(row, 'CreatedById') ?? ''),
+      OwnerId: String(this._getRowValueCaseInsensitive(row, 'OwnerId') ?? ''),
     };
   }
 
@@ -2764,6 +2770,7 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
 
     const mappedRows: Array<Record<string, unknown> | null> = [];
     const total = rows.length;
+    const userMap = await this.runtime.getUserTargetIdMapAsync();
 
     if (total > 0) {
       this.runtime.logFormattedInfo(
@@ -2792,13 +2799,35 @@ export default class ExportFiles implements ISfdmuRunCustomAddonModule {
               return null;
             }
 
-            return {
+            const payloadRecord: Record<string, unknown> = {
               ParentId: targetParentId,
               Name: String(this._getRowValueCaseInsensitive(row, 'Name') ?? ''),
               Body: resolvedBody,
               ContentType: String(this._getRowValueCaseInsensitive(row, 'ContentType') ?? ''),
               Description: String(this._getRowValueCaseInsensitive(row, 'Description') ?? ''),
-            } as Record<string, unknown>;
+            };
+
+            const createdDate = this._getRowValueCaseInsensitive(row, 'CreatedDate');
+            if (createdDate) {
+              payloadRecord['CreatedDate'] = createdDate;
+            }
+
+            const srcCreatedById = String(this._getRowValueCaseInsensitive(row, 'CreatedById') ?? '').trim();
+            if (srcCreatedById) {
+              if (userMap.has(srcCreatedById)) {
+                payloadRecord['CreatedById'] = userMap.get(srcCreatedById);
+                payloadRecord['OwnerId'] = userMap.get(srcCreatedById);
+              }
+            }
+
+            const srcOwnerId = String(this._getRowValueCaseInsensitive(row, 'OwnerId') ?? '').trim();
+            if (srcOwnerId && !payloadRecord['OwnerId']) {
+              if (userMap.has(srcOwnerId)) {
+                payloadRecord['OwnerId'] = userMap.get(srcOwnerId);
+              }
+            }
+
+            return payloadRecord;
           } catch (error) {
             const attachmentId = String(
               this._getRowValueCaseInsensitive(row, 'Id') ?? ''

@@ -271,4 +271,13 @@ export default class BridgeRuntimeAdapter implements ISfdmuRunCustomAddonRuntime
     );
     return updated as unknown as T[];
   }
+
+  /**
+   * Returns the User mapping table (Source UserId -> Target UserId).
+   *
+   * @returns User ID map.
+   */
+  public async getUserTargetIdMapAsync(): Promise<Map<string, string>> {
+    return this._runtime.getUserTargetIdMapAsync();
+  }
 }

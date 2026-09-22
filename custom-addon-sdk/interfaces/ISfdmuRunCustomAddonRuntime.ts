@@ -213,4 +213,12 @@ export default interface ISfdmuRunCustomAddonRuntime {
     sourceVersions: T[],
     maxChunkSize?: number
   ): Promise<T[]>;
+
+  /**
+   * Returns the User mapping table (Source UserId -> Target UserId).
+   *
+   * @returns {Promise<Map<string, string>>} User ID map.
+   * @memberof ISfdmuRunCustomAddonRuntime
+   */
+  getUserTargetIdMapAsync(): Promise<Map<string, string>>;
 }
